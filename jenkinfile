@@ -1,0 +1,68 @@
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'action',
+            choices: ['apply', 'destroy'],
+            description: 'Terraform action to perform'
+        )
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scmGit(
+                    branches: [[name: '*/main']],
+                    extensions: [],
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/malikobaid81/jenkins-tf-aws.git'
+                    ]]
+                )
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                sh 'terraform init -reconfigure -input=false'
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                sh 'terraform plan -input=false -out=tfplan'
+            }
+        }
+
+        stage('Approve Destroy') {
+            when {
+                expression { params.action == 'destroy' }
+            }
+            steps {
+                input message: 'Are you sure you want to DESTROY the Terraform infrastructure?',
+                      ok: 'Yes, Destroy'
+            }
+        }
+
+        stage('Terraform Action') {
+            steps {
+                script {
+                    echo "Terraform action is --> ${params.action}"
+
+                    if (params.action == 'apply') {
+                        sh 'terraform apply -input=false -auto-approve tfplan'
+                    } else {
+                        sh 'terraform destroy -input=false -auto-approve'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'rm -f tfplan'
+        }
+    }
+}

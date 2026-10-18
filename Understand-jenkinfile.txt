@@ -1,0 +1,213 @@
+1- Checkout: Downloads your Terraform files from the main branch.
+
+2- Init: Initializes Terraform and configures the backend.
+
+Command:
+terraform init -reconfigure -input=false
+
+a- terraform init = Initializes Terraform and downloads required providers.
+
+b- -reconfigure = Tells Terraform to use the current backend configuration instead of migrating state from the previously initialized backend.
+Imagine Terraform has a register where it remembers where your infrastructure's state file is stored.
+For example, your Terraform configuration might use an S3 bucket:
+
+terraform {
+  backend "s3" {
+    bucket = "my-terraform-state"
+    key    = "project/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+When you run:
+terraform init
+Terraform initializes the project and remembers the backend configuration it used.
+
+Now imagine you change the backend configuration to use a different S3 bucket.
+
+Terraform may notice that the backend configuration has changed and ask whether you want to migrate the existing state.
+
+If you run:
+terraform init -reconfigure
+You're telling Terraform:
+"Use the backend configuration I have now. Don't migrate the existing state from the previously configured backend."
+It means Terraform does not move the existing state from the old backend to the new backend. It does not mean that Terraform moves state in the opposite direction.
+
+Imagine you originally use S3 bucket A, then change your Terraform configuration to use S3 bucket B.
+
+Old backend — S3 Bucket A
+Contains your existing Terraform state, including the EC2 instance Terraform manages.
+
+Run terraform init -reconfigure
+New backend — S3 Bucket B
+
+Terraform uses this backend configuration, but it does not copy the state from Bucket A into Bucket B.
+
+Compare the two commands
+terraform init -reconfigure: Use Bucket B as the configured backend without migrating the existing state from Bucket A.
+terraform init -migrate-state: Attempt to transfer the existing state from Bucket A to Bucket B.
+
+Important example
+Suppose your EC2 instance is still running, and its state exists in Bucket A. You switch to Bucket B using -reconfigure.
+
+The EC2 instance does not disappear. However, if Bucket B has no state for that instance, Terraform may not know that it already manages it. Running terraform apply could then propose creating another EC2 instance.
+
+Remember: -reconfigure changes which backend Terraform uses; it does not move your existing state. If you intend to move the state, use the migration workflow instead.
+
+Think of it like changing the address in your contact book. You're telling Terraform to use the new address, but you're not asking it to move the contents of the old location to the new one.
+
+Remember the difference
+
+terraform init -reconfigure
+Use the current backend configuration without migrating state.
+
+terraform init -migrate-state
+Attempt to move existing state to the newly configured backend.
+
+For your Jenkins pipeline: You don't necessarily need -reconfigure every time. If your backend configuration hasn't changed, a normal terraform init -input=false is generally sufficient.
+
+Also, be careful: reconfiguring Terraform to point at a different, empty state location does not transfer your existing infrastructure's state there.
+
+c- -input=false = Prevents Terraform from asking interactive questions. If it needs input, it fails instead of waiting for someone to type an answer.
+
+3- Plan: Creates a saved plan file named tfplan.
+terraform plan -input=false -out=tfplan
+
+-input=false = Don't ask interactive questions.
+-out=tfplan = Save the generated plan to a file named tfplan. 
+tfplan = A saved plan describing the proposed changes for a particular run.
+
+Normally, you run:
+terraform plan
+Terraform displays the proposed changes on screen.
+With -out=tfplan, Terraform also saves those planned changes into a file.
+
+What the command does
+terraform plan → Creates an execution plan (preview of changes).
+
+-input=false → Prevents Terraform from asking interactive questions. Useful in CI/CD pipelines (like Jenkins) where you don’t want manual prompts.
+
+-out=tfplan → Saves the generated plan into a binary file called tfplan.
+
+Why save the plan (-out=tfplan)?
+Normally, terraform plan just prints the plan to the console. By adding -out=tfplan, you:
+a- Freeze the plan
+The plan is stored exactly as calculated.
+Later, you can run terraform apply tfplan to execute it.
+This ensures you apply exactly what was planned, even if code or variables change in the meantime.
+
+b- Safety in CI/CD pipelines
+Jenkins can generate the plan (tfplan) in one stage.
+A later stage (or even a manual approval step) can apply that plan.
+Prevents accidental drift if someone edits Terraform files between plan and apply.
+
+c- Auditing & Review
+You can store the plan file as an artifact.
+Teams can review what changes will happen before applying.
+Useful in regulated environments where infra changes must be approved.
+
+d- Consistency
+Without -out=tfplan, if you run terraform apply later, Terraform re‑calculates the plan.
+That might differ if variables, state, or provider data changed.
+With tfplan, you guarantee the same actions.
+
+- Typical Workflow
+
+a- Generate plan
+terraform plan -input=false -out=tfplan
+
+b- Review plan
+terraform show tfplan
+
+c- Apply plan
+terraform apply tfplan
+
+d- Delete tfplan file
+rm -f tfplan
+Why delete it? A saved Terraform plan can contain sensitive information, including secrets or sensitive values from your configuration. Removing it also avoids leaving unnecessary files in the Jenkins workspace.
+
+- Advantages in Jenkins Pipelines
+Stage 1: terraform plan -out=tfplan → Jenkins generates plan file.
+Stage 2: Approval step → team reviews plan.
+Stage 3: terraform apply tfplan → Jenkins applies exactly that plan.
+Stage 4: Jenkins delete the file.
+
+This pattern is called “plan and apply separation” and is considered best practice in DevOps pipelines.
+
+- Takeaway:  
+-out=tfplan locks the plan into a file → guarantees consistency, enables approvals, and avoids surprises. It’s especially important in CI/CD pipelines where automation must be predictable.
+Jenkins runs rm -f tfplan and deletes only the saved plan file.
+The EC2 instance still exists. Its Terraform state is not deleted by rm -f tfplan
+
+
+4- terraform apply:
+terraform apply -input=false -auto-approve tfplan
+
+Let's break it down:
+terraform apply = applies infrastructure changes.
+-input=false = prevents interactive questions.
+-auto-approve = skips the normal interactive approval prompt.
+tfplan = tells Terraform to apply the saved plan file.
+
+Important distinction: When you provide a saved plan file such as tfplan, Terraform already treats that plan as the approval of the proposed actions. You don't need -auto-approve when applying a saved plan; it is redundant here.
+
+So this command can simply be:
+terraform apply -input=false tfplan
+
+Compare the two approaches:
+terraform apply --auto-approve = Terraform generates a plan and applies it without asking for approval.
+terraform apply tfplan = Terraform applies the plan you saved earlier.
+
+
+5- Destroy: Requests manual confirmation before destroying infrastructure.
+terraform destroy -input=false -auto-approve
+
+terraform destroy = destroys infrastructure managed by Terraform.
+-input=false = prevents interactive questions.
+-auto-approve = skips Terraform's normal confirmation prompt.
+
+Without -auto-approve, Terraform normally asks you to confirm destruction. With it, Terraform proceeds without that prompt.
+
+In Jenkinsfile, the separate Approve Destroy stage asks a person for confirmation first. After that approval, -auto-approve allows Terraform to execute without asking for a second confirmation inside the shell.
+The Jenkins Approve Destroy stage
+
+stage('Approve Destroy') {
+    when {
+        expression { params.action == 'destroy' }
+    }
+    steps {
+        input message: 'Are you sure you want to DESTROY the Terraform infrastructure?',
+              ok: 'Yes, Destroy'
+    }
+}
+
+This is Jenkins syntax, not Terraform syntax.
+when checks whether the selected action is destroy.
+params.action gets the dropdown selection you created in your Jenkinsfile.
+input pauses the pipeline and asks a person to approve continuing.
+If the action is apply, Jenkins skips this stage.
+
+For example:
+User selects destroy
+Jenkins waits for human approval
+If approved, Terraform destroy runs
+
+One caution: if Jenkins approval is rejected or times out, the pipeline won't proceed normally. You can add a timeout if you don't want it waiting indefinitely.
+
+6- Post: Removes the saved plan file, whether the pipeline succeeds or fails.
+post always sh 'rm -f tfplan'
+
+post {
+    always {
+        sh 'rm -f tfplan'
+    }
+}
+
+This is also Jenkins syntax.
+post defines what Jenkins should do after the pipeline stages finish.
+always means run this cleanup whether the pipeline succeeds or fails.
+sh runs a shell command on the Jenkins agent.
+rm -f tfplan deletes the saved plan file.
+
+Why delete it? A saved Terraform plan can contain sensitive information, including secrets or sensitive values from your configuration. Removing it also avoids leaving unnecessary files in the Jenkins workspace.
+rm -f means delete the file without complaining if it doesn't exist.
